@@ -2,9 +2,8 @@ package rabbitmq
 
 import (
 	"context"
-	"github.com/MashinIvan/rabbitmq/pkg/backoff"
 	"github.com/streadway/amqp"
-	"os/exec"
+	"log"
 	"testing"
 	"time"
 )
@@ -12,7 +11,7 @@ import (
 func TestPublisher_Publish(t *testing.T) {
 	conn, err := newConn()
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	// server
@@ -26,15 +25,20 @@ func TestPublisher_Publish(t *testing.T) {
 	})
 
 	server := NewServer(conn, router)
-	err = startServerAsync(server)
-	if err != nil {
-		t.Error(err)
-	}
+
+	go func() {
+		err := server.ListenAndServe(context.Background())
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	<-time.After(1 * time.Second)
 
 	// publisher
-	publisher, err := NewPublisher(conn, exchangeParams, WithQueueDeclaration(queueParams, "test.foo"), WithRetries(backoff.NewDefaultSigmoidBackoff(), 10))
+	publisher, err := NewPublisher(conn, exchangeParams, WithQueueDeclaration(queueParams, "test.foo"), WithRetries())
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	err = publisher.Publish(context.Background(), "test.foo", false, false, amqp.Publishing{
@@ -43,10 +47,9 @@ func TestPublisher_Publish(t *testing.T) {
 		DeliveryMode: 2,
 	})
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
-	// wait for publish
 	time.Sleep(1 * time.Second)
 
 	if !messageReceived {
@@ -54,26 +57,77 @@ func TestPublisher_Publish(t *testing.T) {
 	}
 }
 
-func TestPublisher_Broken(t *testing.T) {
+func TestPublisher_Reconnect(t *testing.T) {
 	conn, err := newConn()
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
-	publisher, err := NewPublisher(conn, exchangeParams, WithQueueDeclaration(queueParams, "test.foo"), WithRetries(backoff.NewDefaultSigmoidBackoff(), 10))
+	// server
+	router := NewRouter()
+	routerGroup := router.Group(exchangeParams, queueParams, qos, consumer)
+
+	messageReceived := false
+	routerGroup.Route("test.foo", func(ctx *DeliveryContext) {
+		ctx.Ack()
+		messageReceived = true
+	})
+
+	server := NewServer(conn, router)
+
+	go func() {
+		err := server.ListenAndServe(context.Background())
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	<-time.After(1 * time.Second)
+
+	// publisher
+	publisher, err := NewPublisher(conn, exchangeParams, WithQueueDeclaration(queueParams, "test.foo"), WithRetries())
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
-	cmd := exec.Command(stopRabbitServerCommand, stopRabbitServerCommandArguments...)
-	err = cmd.Run()
+	// restart rabbitmq server here manually
+	log.Println("Restart rabbitmq server manually within 5 seconds")
+
+	time.Sleep(5 * time.Second)
+
+	err = publisher.Publish(context.Background(), "test.foo", false, false, amqp.Publishing{
+		ContentType: "text/plain",
+		Body:        []byte("body"),
+	})
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+
+	time.Sleep(1 * time.Second)
+
+	if !messageReceived {
+		t.Error("message was not received on server side")
+	}
+}
+
+func TestPublisher_CircuitBreaker(t *testing.T) {
+	conn, err := newConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	publisher, err := NewPublisher(conn, exchangeParams, WithQueueDeclaration(queueParams, "test.foo"), WithRetries())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// restart rabbitmq server here manually
+	log.Println("Stop rabbitmq server manually within 5 seconds")
+	time.Sleep(5 * time.Second)
 
 	for i := 0; i < 10; i++ {
 		if publisher.Broken() {
-			t.Error("Publisher is broken")
+			t.FailNow()
 		}
 
 		go func() {
@@ -86,72 +140,22 @@ func TestPublisher_Broken(t *testing.T) {
 			}
 		}()
 
-		// wait for publish in goroutine
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// wait for errors to accumulate
+	// let errors to accumulate
+	log.Println("Let accumulate some errors")
 	time.Sleep(5 * time.Second)
 
 	if !publisher.Broken() {
-		t.Error("Publisher is not broken after expected errors")
+		t.FailNow()
 	}
 
-	err = restartRabbitAndWaitReconnect(7)
-	if err != nil {
-		t.Error(err)
-	}
+	// restart rabbitmq server here manually
+	log.Println("Start rabbitmq server manually within 5 seconds")
+	time.Sleep(10 * time.Second)
 
 	if publisher.Broken() {
-		t.Error("Publisher is broken")
-	}
-}
-
-func TestPublisher_Reconnect(t *testing.T) {
-	conn, err := newConn()
-	if err != nil {
-		t.Error(err)
-	}
-
-	// server
-	router := NewRouter()
-	routerGroup := router.Group(exchangeParams, queueParams, qos, consumer)
-
-	messageReceived := false
-	routerGroup.Route("test.foo", func(ctx *DeliveryContext) {
-		ctx.Ack()
-		messageReceived = true
-	})
-
-	server := NewServer(conn, router)
-	err = startServerAsync(server)
-	if err != nil {
-		t.Error(err)
-	}
-
-	// publisher
-	publisher, err := NewPublisher(conn, exchangeParams, WithQueueDeclaration(queueParams, "test.foo"), WithRetries(backoff.NewDefaultSigmoidBackoff(), 10))
-	if err != nil {
-		t.Error(err)
-	}
-
-	err = restartRabbitAndWaitReconnect(7)
-	if err != nil {
-		t.Error(err)
-	}
-
-	err = publisher.Publish(context.Background(), "test.foo", false, false, amqp.Publishing{
-		ContentType: "text/plain",
-		Body:        []byte("body"),
-	})
-	if err != nil {
-		t.Error(err)
-	}
-
-	// wait for message publish
-	time.Sleep(1 * time.Second)
-
-	if !messageReceived {
-		t.Error("message was not received on server side")
+		t.FailNow()
 	}
 }

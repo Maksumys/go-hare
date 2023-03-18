@@ -3,29 +3,14 @@ package publisher
 import (
 	"context"
 	"fmt"
-	"github.com/MashinIvan/rabbitmq"
-	"github.com/MashinIvan/rabbitmq/pkg/backoff"
+	"github.com/Maksumys/go-hare"
+	"github.com/pkg/errors"
 	"github.com/streadway/amqp"
 	"log"
 	"os"
 )
 
 func main() {
-	conn, err := rabbitmq.NewConnection(connFactory, backoff.NewDefaultSigmoidBackoff())
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	router := provideRouter()
-	server := rabbitmq.NewServer(conn, router)
-
-	err = server.ListenAndServe(context.Background())
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
-func connFactory() (*amqp.Connection, error) {
 	connUrl := fmt.Sprintf(
 		"amqp://%s:%s@%s:%s/",
 		os.Getenv("USER"),
@@ -34,7 +19,28 @@ func connFactory() (*amqp.Connection, error) {
 		os.Getenv("PORT"),
 	)
 
-	return amqp.Dial(connUrl)
+	conn, err := amqp.Dial(connUrl)
+
+	if err != nil {
+		panic(err)
+	}
+
+	connection := rabbitmq.NewConnection(conn, func() (*amqp.Connection, error) {
+		conn, err := amqp.Dial(connUrl)
+		if err != nil {
+			return nil, errors.WithMessage(err, "di provideRabbit NewConnection Dial failed")
+		}
+
+		return conn, nil
+	})
+
+	router := provideRouter()
+	server := rabbitmq.NewServer(connection, router)
+
+	err = server.ListenAndServe(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 // provideRouter func creates a new router and binds controller functions to different routing keys.

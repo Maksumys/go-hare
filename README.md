@@ -14,16 +14,16 @@ Key features:
 ## Installation
 
 ```sh
-go get github.com/MashinIvan/rabbitmq
+go get github.com/Maksumys/go-hare
 ```
 
 <!-- USAGE EXAMPLES -->
 ## Examples
 
-See [examples](https://github.com/MashinIvan/rabbitmq/tree/main/examples)
+See [examples](https://github.com/Maksumys/go-hare/rabbitmq/tree/main/examples)
 
 
 <!-- LICENSE -->
 ## License
 
-Licensed under the [MIT License](https://github.com/MashinIvan/rabbitmq/blob/main/LICENSE)
+Licensed under the [MIT License](https://github.com/Maksumys/go-hare/rabbitmq/blob/main/LICENSE)

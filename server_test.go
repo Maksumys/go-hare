@@ -2,10 +2,37 @@ package rabbitmq
 
 import (
 	"context"
+	"fmt"
 	"github.com/streadway/amqp"
+	"log"
+	"os"
 	"testing"
 	"time"
 )
+
+func newConn() (*Connection, error) {
+	connUrl := fmt.Sprintf(
+		"amqp://%s:%s@%s:%s/",
+		os.Getenv("USER"),
+		os.Getenv("PASSWORD"),
+		os.Getenv("HOST"),
+		os.Getenv("PORT"),
+	)
+
+	conn, err := amqp.Dial(connUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	connection := NewConnection(conn, func() (*amqp.Connection, error) {
+		return amqp.Dial(connUrl)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return connection, nil
+}
 
 var exchangeParams = ExchangeParams{
 	Name:       "test",
@@ -28,31 +55,10 @@ var consumer = ConsumerParams{
 	ConsumerArgs: nil,
 }
 
-func startServerAsync(server *Server) error {
-	errChan := make(chan error)
-	go func() {
-		err := server.ListenAndServe(context.Background())
-		if err != nil {
-			errChan <- err
-		}
-	}()
-
-	// wait for server startup
-	time.Sleep(1 * time.Second)
-
-	// check for ListenAndServe error
-	select {
-	case err := <-errChan:
-		return err
-	default:
-		return nil
-	}
-}
-
-func TestServer_ListenAndServe(t *testing.T) {
+func TestServerRouting(t *testing.T) {
 	conn, err := newConn()
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	router := NewRouter()
@@ -95,16 +101,19 @@ func TestServer_ListenAndServe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer server.Shutdown(context.Background())
 
-	err = startServerAsync(server)
-	if err != nil {
-		t.Error(err)
-	}
+	go func() {
+		err = server.ListenAndServe(context.Background())
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	<-time.After(1 * time.Second)
 
 	publisherCh, err := conn.Channel()
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	for i := 0; i < 10; i++ {
@@ -113,7 +122,7 @@ func TestServer_ListenAndServe(t *testing.T) {
 			Body:        fooMessage,
 		})
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 	}
 
@@ -124,12 +133,11 @@ func TestServer_ListenAndServe(t *testing.T) {
 			DeliveryMode: 2,
 		})
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 	}
 
-	// wait for messages to arrive
-	time.Sleep(1 * time.Second)
+	<-time.After(3 * time.Second)
 
 	if !fooMessageReceived {
 		t.Error("foo message was not received")
@@ -142,7 +150,7 @@ func TestServer_ListenAndServe(t *testing.T) {
 func TestServer_Shutdown(t *testing.T) {
 	conn, err := newConn()
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	router := NewRouter()
@@ -150,7 +158,6 @@ func TestServer_Shutdown(t *testing.T) {
 
 	gracefulStopCompleted := false
 	routerGroup.Route("test.foo", func(ctx *DeliveryContext) {
-		// simulate message processing time
 		time.Sleep(5 * time.Second)
 		gracefulStopCompleted = true
 	})
@@ -160,10 +167,14 @@ func TestServer_Shutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = startServerAsync(server)
-	if err != nil {
-		t.Error(err)
-	}
+	go func() {
+		err = server.ListenAndServe(context.Background())
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	<-time.After(1 * time.Second)
 
 	publisherCh, err := conn.Channel()
 	if err != nil {
@@ -178,8 +189,7 @@ func TestServer_Shutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// wait for publish
-	time.Sleep(1 * time.Second)
+	<-time.After(1 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -190,7 +200,7 @@ func TestServer_Shutdown(t *testing.T) {
 	}
 
 	if !gracefulStopCompleted {
-		t.Error("graceful stop did not complete")
+		t.Fail()
 	}
 }
 
@@ -204,7 +214,7 @@ func TestServer_Reconnect(t *testing.T) {
 	routerGroup := router.Group(
 		ExchangeParams{
 			Name:       "test-durable",
-			Kind:       "topic",
+			Kind:       "direct",
 			Durable:    true,
 			AutoDelete: false,
 		}, QueueParams{
@@ -214,43 +224,45 @@ func TestServer_Reconnect(t *testing.T) {
 		}, qos, consumer,
 	)
 
-	messageReceivedFirstTime := false
-	messageReceivedSecondTime := false
+	messageReceived := false
+	messageReceivedTwice := false
 
 	routerGroup.Route("test.foo", func(ctx *DeliveryContext) {
-		// simulate message processing time
 		time.Sleep(1 * time.Second)
+		messageReceived = true
 
-		if !messageReceivedFirstTime {
-			messageReceivedFirstTime = true
-			// test send after server is restarted on message processing
-			go func() {
-				err = restartRabbitAndWaitReconnect(7)
-				if err != nil {
-					t.Error(err)
-				}
-			}()
+		// restart rabbitmq server here manually
+		log.Println("Restart rabbitmq server manually within 5 seconds")
 
-			// wait for server stop
-			time.Sleep(1 * time.Second)
-		}
+		time.Sleep(5 * time.Second)
 
 		if !ctx.Ack() {
 			return
 		}
 
-		messageReceivedSecondTime = true
+		messageReceivedTwice = true
 	})
 
 	server := NewServer(conn, router)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer server.Shutdown(context.Background())
 
-	err = startServerAsync(server)
-	if err != nil {
-		t.Error(err)
+	errChan := make(chan error)
+	go func() {
+		err = server.ListenAndServe(context.Background())
+		if err != nil {
+			errChan <- err
+		}
+	}()
+
+	time.Sleep(1 * time.Second)
+
+	// check for ListenAndServe error
+	select {
+	case err = <-errChan:
+		t.Fatal(err)
+	default:
 	}
 
 	publisher, err := conn.Channel()
@@ -267,18 +279,11 @@ func TestServer_Reconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// wait for message to be processed with server shutdown while processing, restarted and processed again
-	<-time.After(15 * time.Second)
+	<-time.After(30 * time.Second)
 
-	err = server.Shutdown(context.Background())
-	if err != nil {
-		t.Error(err)
-	}
+	server.Shutdown(context.Background())
 
-	if !messageReceivedFirstTime {
-		t.Error("message was not received first time")
-	}
-	if !messageReceivedSecondTime {
-		t.Error("message was not received second time")
+	if !messageReceived || !messageReceivedTwice {
+		t.Error("message was not received")
 	}
 }

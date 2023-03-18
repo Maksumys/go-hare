@@ -43,7 +43,7 @@ var testCasesDirect = []*routerEngineTestCase{
 
 func resetTestCases(testCases []*routerEngineTestCase) {
 	for i, _ := range testCases {
-		testCases[i].triggered = false
+		testCasesTopic[i].triggered = false
 	}
 }
 
@@ -65,7 +65,7 @@ func getTriggered(testCases []*routerEngineTestCase) []int {
 	return result
 }
 
-func TestDirectRouterEngine_Route(t *testing.T) {
+func TestDirectRouterEngine_GetControllers(t *testing.T) {
 	engine := NewDirectRouterEngine()
 
 	for _, testCase := range testCasesDirect {
@@ -78,7 +78,7 @@ func TestDirectRouterEngine_Route(t *testing.T) {
 	expectedTriggered := []int{0}
 	triggered := getTriggered(testCasesDirect)
 	if !reflect.DeepEqual(expectedTriggered, triggered) {
-		t.Errorf("expected triggered: %v; triggered: %v", expectedTriggered, triggered)
+		t.FailNow()
 	}
 
 	resetTestCases(testCasesDirect)
@@ -89,7 +89,7 @@ func TestDirectRouterEngine_Route(t *testing.T) {
 	expectedTriggered = []int{1}
 	triggered = getTriggered(testCasesDirect)
 	if !reflect.DeepEqual(expectedTriggered, triggered) {
-		t.Errorf("expected triggered: %v; triggered: %v", expectedTriggered, triggered)
+		t.FailNow()
 	}
 }
 
@@ -144,7 +144,7 @@ var testCasesTopic = []*routerEngineTestCase{
 	},
 }
 
-func TestTopicRouterEngine_Route(t *testing.T) {
+func TestTopicRouterEngine_GetControllers(t *testing.T) {
 	engine := NewTopicRouterEngine()
 
 	for _, testCase := range testCasesTopic {
@@ -157,7 +157,7 @@ func TestTopicRouterEngine_Route(t *testing.T) {
 	expectedTriggered := []int{0, 1, 2, 3}
 	triggered := getTriggered(testCasesTopic)
 	if !reflect.DeepEqual(expectedTriggered, triggered) {
-		t.Errorf("expected triggered: %v; triggered: %v", expectedTriggered, triggered)
+		t.FailNow()
 	}
 
 	resetTestCases(testCasesTopic)
@@ -168,11 +168,11 @@ func TestTopicRouterEngine_Route(t *testing.T) {
 	expectedTriggered = []int{3, 4, 7}
 	triggered = getTriggered(testCasesTopic)
 	if !reflect.DeepEqual(expectedTriggered, triggered) {
-		t.Errorf("expected triggered: %v; triggered: %v", expectedTriggered, triggered)
+		t.FailNow()
 	}
 }
 
-func BenchmarkDirectRouterEngine_Route(b *testing.B) {
+func BenchmarkDirectRouterEngine_GetControllers(b *testing.B) {
 	engine := NewDirectRouterEngine()
 	for _, test := range testCasesDirect {
 		engine.AddBinding(test.routingKey, test.ControllerFunc)
@@ -193,7 +193,7 @@ func BenchmarkDirectRouterEngine_Route(b *testing.B) {
 	}
 }
 
-func BenchmarkTopicRouterEngine_Route(b *testing.B) {
+func BenchmarkTopicRouterEngine_GetControllers(b *testing.B) {
 	engine := NewTopicRouterEngine()
 	for _, test := range testCasesDirect {
 		engine.AddBinding(test.routingKey, test.ControllerFunc)

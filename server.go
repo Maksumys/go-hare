@@ -2,13 +2,12 @@ package rabbitmq
 
 import (
 	"context"
-	"errors"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
-	"log"
 	"sync"
 )
 
-// NewServer constructs a new *Server.
 func NewServer(conn *Connection, router *Router) *Server {
 	return &Server{
 		Conn:                conn,
@@ -19,7 +18,6 @@ func NewServer(conn *Connection, router *Router) *Server {
 	}
 }
 
-// Server is used to accept messages from rabbitmq server and route then to controllers registered in Router.
 type Server struct {
 	Conn *Connection
 
@@ -30,16 +28,14 @@ type Server struct {
 	waitCh    chan struct{}
 }
 
-// ListenAndServe blocks on listening for deliveries. It creates a separate channel for each worker in every RouterGroup.
-// Channel is then used to receive messages and route then to RouterGroup controllers.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	for {
-		log.Println("RabbitMQServer ListenAndServe started listening")
+		logrus.Info("RabbitMQServer ListenAndServe started listening")
 
 		for _, group := range s.router.queuesGroups {
 			err := s.bindGroup(group)
 			if err != nil {
-				return err
+				return errors.WithMessage(err, "RabbitMQServer ListenAndServe declareAndBind failed")
 			}
 		}
 
@@ -55,11 +51,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 					group.queueConsumerParams.ConsumerArgs,
 				)
 				if err != nil {
-					return err
+					return errors.Wrap(err, "RabbitMQServer ListenAndServe Consume failed")
 				}
 
 				s.workersWG.Add(1)
-
 				go s.worker(ctx, deliveryChan, ch, group)
 			}
 		}
@@ -70,12 +65,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		select {
 		case err := <-s.Conn.NotifyClose(make(chan error)):
 			if err != nil {
-				return err
+				return errors.WithMessage(err, "RabbitMQServer ListenAndServe NotifyClose")
 			}
 			return nil
 		case err := <-s.Conn.NotifyReconnect(make(chan error)):
 			if err != nil {
-				return err
+				return errors.WithMessage(err, "RabbitMQServer ListenAndServe NotifyReconnect")
 			}
 
 			s.removeActiveChannelsAfterReconnect()
@@ -84,8 +79,6 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// Shutdown performs graceful shutdown of a Server. When a server is shut down, first every channel is closed for new deliveries.
-// Then Server waits until either a context is cancelled, or every worker stops processing its message.
 func (s *Server) Shutdown(ctx context.Context) error {
 	defer s.Conn.Close()
 
@@ -109,7 +102,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 	for i := 0; i < group.workers; i++ {
 		ch, err := s.newChannel(group)
 		if err != nil {
-			return err
+			return errors.WithMessage(err, "RabbitMQServer bindGroup newChannel failed")
 		}
 
 		err = ch.ExchangeDeclare(
@@ -122,7 +115,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 			group.exchangeParams.Args,
 		)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "RabbitMQServer bindGroup ExchangeDeclare failed")
 		}
 
 		queue, err := ch.QueueDeclare(
@@ -134,18 +127,18 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 			group.queueParams.Args,
 		)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "RabbitMQServer bindGroup QueueDeclare failed")
 		}
 
 		err = ch.Qos(group.qos.PrefetchCount, group.qos.PrefetchSize, false)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "RabbitMQServer bindGroup Qos failed")
 		}
 
 		for _, bindingKey := range group.bindings {
 			err = ch.QueueBind(queue.Name, bindingKey, group.exchangeParams.Name, false, nil)
 			if err != nil {
-				return err
+				return errors.Wrap(err, "RabbitMQServer bindGroup QueueBind failed")
 			}
 		}
 	}
@@ -156,7 +149,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 func (s *Server) newChannel(group *RouterGroup) (*amqp.Channel, error) {
 	ch, err := s.Conn.Channel()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "RabbitMQServer DeclareAndBind failed to open ch")
 	}
 
 	if _, ok := s.routerGroupChannels[group]; !ok {
@@ -177,7 +170,7 @@ func (s *Server) worker(ctx context.Context, deliveryChan <-chan amqp.Delivery, 
 	defer s.workersWG.Done()
 
 	for delivery := range deliveryChan {
-		log.Printf("RabbitMQServerer worker received message with routingKey %s\n", delivery.RoutingKey)
+		logrus.Tracef("RabbitMQServerer worker received message with routingKey %s", delivery.RoutingKey)
 
 		controllers := group.engine.Route(delivery.RoutingKey)
 
@@ -185,9 +178,6 @@ func (s *Server) worker(ctx context.Context, deliveryChan <-chan amqp.Delivery, 
 			continue
 		}
 
-		for _, controller := range controllers {
-			deliveryCtx := NewDeliveryContext(ctx, delivery, channel)
-			controller(deliveryCtx)
-		}
+		NewDeliveryContext(ctx, delivery, channel, controllers).Next()
 	}
 }

@@ -3,23 +3,14 @@ package publisher
 import (
 	"context"
 	"fmt"
-	"github.com/MashinIvan/rabbitmq"
-	"github.com/MashinIvan/rabbitmq/pkg/backoff"
+	"github.com/Maksumys/go-hare"
+	"github.com/pkg/errors"
 	"github.com/streadway/amqp"
 	"log"
 	"os"
 )
 
 func main() {
-	conn, err := rabbitmq.NewConnection(connFactory, backoff.NewDefaultSigmoidBackoff())
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	runServer(conn)
-}
-
-func connFactory() (*amqp.Connection, error) {
 	connUrl := fmt.Sprintf(
 		"amqp://%s:%s@%s:%s/",
 		os.Getenv("USER"),
@@ -28,7 +19,22 @@ func connFactory() (*amqp.Connection, error) {
 		os.Getenv("PORT"),
 	)
 
-	return amqp.Dial(connUrl)
+	conn, err := amqp.Dial(connUrl)
+
+	if err != nil {
+		panic(err)
+	}
+
+	connection := rabbitmq.NewConnection(conn, func() (*amqp.Connection, error) {
+		conn, err := amqp.Dial(connUrl)
+		if err != nil {
+			return nil, errors.WithMessage(err, "di provideRabbit NewConnection Dial failed")
+		}
+
+		return conn, nil
+	})
+
+	runServer(connection)
 }
 
 func runServer(conn *rabbitmq.Connection) {

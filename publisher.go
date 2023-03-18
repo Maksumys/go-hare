@@ -2,20 +2,27 @@ package rabbitmq
 
 import (
 	"context"
-	"errors"
-	"github.com/MashinIvan/rabbitmq/pkg/backoff"
+	"fmt"
+	otel2 "github.com/Maksumys/go-hare/middlewares"
+	"github.com/Maksumys/go-hare/pkg/backoff"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
-	"log"
+	"go.opentelemetry.io/otel"
 	"sync/atomic"
+	"time"
 )
 
-var ErrTooManyFailures = errors.New("too many consecutive failures")
+const (
+	DefaultCircuitBreakerConsecutiveFailuresAllowed = 10
+	defaultBackoffMaxTimeout                        = 15 * time.Second
+)
 
-// NewPublisher creates a new *Publisher. Publisher is used to declare exchange and publish messages to this exchange.
 func NewPublisher(connection *Connection, exchangeParams ExchangeParams, opts ...PublisherOption) (*Publisher, error) {
 	p := &Publisher{
 		Conn:           connection,
 		exchangeParams: exchangeParams,
+		maxTimeout:     defaultBackoffMaxTimeout,
 	}
 
 	for _, opt := range opts {
@@ -24,7 +31,7 @@ func NewPublisher(connection *Connection, exchangeParams ExchangeParams, opts ..
 
 	err := p.prepareChannelAndTransport()
 	if err != nil {
-		return nil, err
+		return nil, errors.WithMessage(err, "RabbitMQPublisher NewPublisher prepareChannelAndTransport failed")
 	}
 
 	go p.watchReconnect()
@@ -34,18 +41,12 @@ func NewPublisher(connection *Connection, exchangeParams ExchangeParams, opts ..
 
 type PublisherOption func(p *Publisher)
 
-// WithRetries makes Publisher.Publish retry on failure with a backoff. consecutiveFailuresBeforeBreak is used as a
-// simple circuit breaker. When consecutiveFailuresBeforeBreak is greater than 0 and reached, Publisher.Publish will return ErrTooManyFailures
-// and Publisher.Broken will return true.
-func WithRetries(backoff backoff.Backoff, consecutiveFailuresBeforeBreak uint32) PublisherOption {
+func WithRetries() PublisherOption {
 	return func(p *Publisher) {
 		p.retryPublish = true
-		p.backoff = backoff
-		p.consecutiveFailuresAllowed = consecutiveFailuresBeforeBreak
 	}
 }
 
-// WithQueueDeclaration makes publisher declare a queue on rabbitmq server and bind it to Publisher exchange by bindingKey parameter.
 func WithQueueDeclaration(queueParams QueueParams, bindingKey string) PublisherOption {
 	return func(p *Publisher) {
 		p.declareQueue = true
@@ -54,12 +55,24 @@ func WithQueueDeclaration(queueParams QueueParams, bindingKey string) PublisherO
 	}
 }
 
-// Publisher is used to publish messages to single exchange.
-// On construction, publisher creates a new channel and declares an exchange. It features an option to declare a queue as well.
-// It features an option to retry publish attempts on failures.
+func WithTraceInjection() PublisherOption {
+	return func(p *Publisher) {
+		p.withTraceInjection = true
+	}
+}
+
+func WithLogger(cfg LoggerConfig) PublisherOption {
+	return func(p *Publisher) {
+		p.loggerCfg = cfg
+	}
+}
+
 type Publisher struct {
 	Conn *Connection
 	ch   *amqp.Channel
+
+	consecutiveErrors atomic.Uint32
+	connClosed        bool
 
 	exchangeParams ExchangeParams
 	declareQueue   bool
@@ -67,84 +80,83 @@ type Publisher struct {
 	bindingKey     string
 
 	retryPublish bool
-	backoff      backoff.Backoff
+	maxTimeout   time.Duration
 
-	consecutivePublishFailures atomic.Uint32
-	consecutiveFailuresAllowed uint32
+	loggerCfg LoggerConfig
+
+	withTraceInjection bool
 }
 
-// Publish sends a message to rabbitmq server.
-func (p *Publisher) Publish(ctx context.Context, key string, mandatory, immediate bool, msg amqp.Publishing) error {
-	if p.Broken() {
-		return ErrTooManyFailures
+func (p *Publisher) Publish(ctx context.Context, key string, mandatory, immediate bool, msg amqp.Publishing) (err error) {
+	if p.withTraceInjection {
+		if msg.Headers == nil {
+			msg.Headers = make(amqp.Table, 3)
+		}
+
+		injectTrace(ctx, msg.Headers)
 	}
 
-	err := p.ch.Publish(p.exchangeParams.Name, key, mandatory, immediate, msg)
-	if err != nil && !p.retryPublish {
-		return err
-	}
-
-	p.backoff.Reset()
-
+	backoff := backoff.NewSigmoidBackoff(p.maxTimeout, 0.5, 15, 0)
 	for {
 		err = p.ch.Publish(p.exchangeParams.Name, key, mandatory, immediate, msg)
 		if err != nil {
-			log.Printf("RabbitMQPublisher Publish failed: %v\n", err)
+			logrus.WithContext(ctx).Warningf("RabbitMQPublisher Publish failed: %v", err)
+			p.consecutiveErrors.Add(1)
 
-			err = p.backoff.Retry(ctx)
-			if err != nil {
+			if !p.retryPublish || p.connClosed {
 				return err
 			}
 
-			p.consecutivePublishFailures.Add(1)
+			err = backoff.Retry(ctx)
+			if err != nil {
+				return errors.WithMessage(err, "RabbitMQPublisher Publish BackoffRetry failed")
+			}
+
 			continue
 		}
 
-		p.consecutivePublishFailures.Store(0)
-		log.Printf("RabbitMQPublisher Publish to %s %s ok\n", p.exchangeParams.Name, key)
-		return nil
-	}
+		p.consecutiveErrors.Store(0)
 
-	//err := p.ch.Publish(p.exchangeParams.Name, key, mandatory, immediate, msg)
+		p.log(ctx, LogParams{
+			ExchangeName: p.exchangeParams.Name,
+			Key:          key,
+		})
+
+		return
+	}
 }
 
-// Broken is true, if consecutive publish failures is more than Publisher.consecutiveFailuresAllowed
+// Broken возвращает true в случае, если последовательное количество ошибок Publish > DefaultCircuitBreakerConsecutiveFailuresAllowed
 func (p *Publisher) Broken() bool {
-	return p.consecutivePublishFailures.Load() > p.consecutiveFailuresAllowed
-}
-
-func (p *Publisher) attemptPublish(key string, mandatory, immediate bool, msg amqp.Publishing) error {
-	err := p.ch.Publish(p.exchangeParams.Name, key, mandatory, immediate, msg)
-	if err != nil {
-		p.consecutivePublishFailures.Add(1)
-		return err
-	}
-
-	return nil
+	return p.consecutiveErrors.Load() > DefaultCircuitBreakerConsecutiveFailuresAllowed
 }
 
 func (p *Publisher) watchReconnect() {
+	defer func() {
+		p.connClosed = true
+	}()
+
 	for {
 		select {
 		case err := <-p.Conn.NotifyClose(make(chan error)):
 			if err != nil {
-				log.Printf("RabbitMQPublisher watchReconnect NotifyClose: %v\n", err)
+				logrus.Errorf("RabbitMQPublisher watchReconnect NotifyClose: %v", err)
 			}
 
 			return
 		case err := <-p.Conn.NotifyReconnect(make(chan error)):
 			if err != nil {
-				log.Printf("RabbitMQPublisher watchReconnect NotifyReconnect: %v\n", err)
+				logrus.Errorf("RabbitMQPublisher watchReconnect NotifyReconnect: %v", err)
 				return
 			}
 
 			err = p.prepareChannelAndTransport()
 			if err != nil {
-				log.Printf("RabbitMQPublisher watchReconnect prepareChannelAndTransport failed: %v\n", err)
+				logrus.Errorf("RabbitMQPublisher watchReconnect prepareChannelAndTransport failed: %v", err)
 				return
 			}
 
-			log.Println("RabbitMQPublisher watchReconnect reconnected successfully")
+			logrus.Info("RabbitMQPublisher watchReconnect reconnected successfully")
 			continue
 		}
 	}
@@ -153,12 +165,12 @@ func (p *Publisher) watchReconnect() {
 func (p *Publisher) prepareChannelAndTransport() error {
 	err := p.newChannel()
 	if err != nil {
-		return err
+		return errors.WithMessage(err, "RabbitMQPublisher watchReconnect newChannel failed")
 	}
 
 	err = p.declareAndBind(p.bindingKey)
 	if err != nil {
-		return err
+		return errors.WithMessage(err, "RabbitMQPublisher watchReconnect declareAndBind failed")
 	}
 
 	return nil
@@ -181,7 +193,7 @@ func (p *Publisher) declareAndBind(bindingKey string) error {
 		p.exchangeParams.Args,
 	)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "RabbitMQPublisher declareAndBind ExchangeDeclare failed")
 	}
 
 	if p.declareQueue {
@@ -194,14 +206,33 @@ func (p *Publisher) declareAndBind(bindingKey string) error {
 			p.queueParams.Args,
 		)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "RabbitMQPublisher declareAndBind QueueDeclare failed")
 		}
 
 		err = p.ch.QueueBind(queue.Name, bindingKey, p.exchangeParams.Name, false, nil)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "RabbitMQPublisher declareAndBind QueueBind failed")
 		}
 	}
 
 	return nil
+}
+
+func (p *Publisher) log(ctx context.Context, params LogParams) {
+	if p.loggerCfg.Logger == nil {
+		return
+	}
+
+	var msg string
+	if p.loggerCfg.Formatter != nil {
+		msg = p.loggerCfg.Formatter(&params)
+	} else {
+		msg = fmt.Sprint(params)
+	}
+
+	p.loggerCfg.Logger.InfoStr(ctx, msg)
+}
+
+func injectTrace(ctx context.Context, headers map[string]interface{}) {
+	otel.GetTextMapPropagator().Inject(ctx, otel2.HeadersCarrier(headers))
 }
