@@ -230,7 +230,7 @@ func (p *Publisher) log(ctx context.Context, params LogParams) {
 		msg = fmt.Sprint(params)
 	}
 
-	p.loggerCfg.Logger.InfoStr(ctx, msg)
+	p.loggerCfg.Logger.TraceStr(ctx, msg)
 }
 
 func injectTrace(ctx context.Context, headers map[string]interface{}) {

@@ -9,6 +9,7 @@ import (
 type Logger interface {
 	InfoStr(ctx context.Context, message string)
 	ErrorStr(ctx context.Context, message string)
+	TraceStr(ctx context.Context, message string)
 }
 
 type LogParams struct {
@@ -36,7 +37,7 @@ func Middleware(cfg Config) rabbitmq.ControllerFunc {
 	return func(c *rabbitmq.DeliveryContext) {
 		c.Next()
 
-		cfg.Logger.InfoStr(c.Context, cfg.Formatter(&LogParams{
+		cfg.Logger.TraceStr(c.Context, cfg.Formatter(&LogParams{
 			ExchangeName: c.Delivery.Exchange,
 			RoutingKey:   c.Delivery.RoutingKey,
 			Acked:        c.Acked,
@@ -51,5 +52,9 @@ func (d defaultLogger) InfoStr(ctx context.Context, message string) {
 }
 
 func (d defaultLogger) ErrorStr(ctx context.Context, message string) {
+	fmt.Println(message)
+}
+
+func (d defaultLogger) TraceStr(ctx context.Context, message string) {
 	fmt.Println(message)
 }
