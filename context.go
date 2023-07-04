@@ -17,6 +17,8 @@ type DeliveryContext struct {
 
 	Acked  bool
 	Nacked bool
+
+	userValues map[string]any
 }
 
 func NewDeliveryContext(
@@ -26,11 +28,12 @@ func NewDeliveryContext(
 	handlers []ControllerFunc,
 ) *DeliveryContext {
 	return &DeliveryContext{
-		Context:  baseCtx,
-		Delivery: delivery,
-		Channel:  ch,
-		handlers: handlers,
-		index:    -1,
+		Context:    baseCtx,
+		Delivery:   delivery,
+		Channel:    ch,
+		handlers:   handlers,
+		index:      -1,
+		userValues: make(map[string]any),
 	}
 }
 
@@ -90,4 +93,13 @@ func (c *DeliveryContext) Ack() bool {
 	logrus.Tracef("AMQP Consumer %v acknowledged", c.Delivery.RoutingKey)
 	c.Acked = true
 	return true
+}
+
+func (c *DeliveryContext) Set(key string, value any) {
+	c.userValues[key] = value
+}
+
+func (c *DeliveryContext) Get(key string) (any, bool) {
+	value, ok := c.userValues[key]
+	return value, ok
 }
