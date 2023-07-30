@@ -3,8 +3,8 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
-	"github.com/streadway/amqp"
 )
 
 type DeliveryContext struct {

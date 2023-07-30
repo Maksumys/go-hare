@@ -2,8 +2,8 @@ package rabbitmq
 
 import (
 	"github.com/pkg/errors"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
-	"github.com/streadway/amqp"
 )
 
 type Consumer struct {
