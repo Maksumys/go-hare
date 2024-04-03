@@ -2,9 +2,8 @@ package rabbitmq
 
 import (
 	"context"
-	"github.com/pkg/errors"
+	"errors"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/sirupsen/logrus"
 	"sync"
 )
 
@@ -30,12 +29,10 @@ type Server struct {
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	for {
-		logrus.Info("RabbitMQServer ListenAndServe started listening")
-
 		for _, group := range s.router.queuesGroups {
 			err := s.bindGroup(group)
 			if err != nil {
-				return errors.WithMessage(err, "RabbitMQServer ListenAndServe declareAndBind failed")
+				return errors.Join(err, errors.New("RabbitMQServer ListenAndServe declareAndBind failed"))
 			}
 		}
 
@@ -51,7 +48,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 					group.queueConsumerParams.ConsumerArgs,
 				)
 				if err != nil {
-					return errors.Wrap(err, "RabbitMQServer ListenAndServe Consume failed")
+					return errors.Join(err, errors.New("RabbitMQServer ListenAndServe Consume failed"))
 				}
 
 				s.workersWG.Add(1)
@@ -65,12 +62,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		select {
 		case err := <-s.Conn.NotifyClose(make(chan error)):
 			if err != nil {
-				return errors.WithMessage(err, "RabbitMQServer ListenAndServe NotifyClose")
+				return errors.Join(err, errors.New("RabbitMQServer ListenAndServe NotifyClose"))
 			}
 			return nil
 		case err := <-s.Conn.NotifyReconnect(make(chan error)):
 			if err != nil {
-				return errors.WithMessage(err, "RabbitMQServer ListenAndServe NotifyReconnect")
+				return errors.Join(err, errors.New("RabbitMQServer ListenAndServe NotifyReconnect"))
 			}
 
 			s.removeActiveChannelsAfterReconnect()
@@ -102,7 +99,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 	for i := 0; i < group.workers; i++ {
 		ch, err := s.newChannel(group)
 		if err != nil {
-			return errors.WithMessage(err, "RabbitMQServer bindGroup newChannel failed")
+			return errors.Join(err, errors.New("RabbitMQServer bindGroup newChannel failed"))
 		}
 
 		err = ch.ExchangeDeclare(
@@ -115,7 +112,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 			group.exchangeParams.Args,
 		)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQServer bindGroup ExchangeDeclare failed")
+			return errors.Join(err, errors.New("RabbitMQServer bindGroup ExchangeDeclare failed"))
 		}
 
 		queue, err := ch.QueueDeclare(
@@ -127,18 +124,18 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 			group.queueParams.Args,
 		)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQServer bindGroup QueueDeclare failed")
+			return errors.Join(err, errors.New("RabbitMQServer bindGroup QueueDeclare failed"))
 		}
 
 		err = ch.Qos(group.qos.PrefetchCount, group.qos.PrefetchSize, false)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQServer bindGroup Qos failed")
+			return errors.Join(err, errors.New("RabbitMQServer bindGroup Qos failed"))
 		}
 
 		for _, bindingKey := range group.bindings {
 			err = ch.QueueBind(queue.Name, bindingKey, group.exchangeParams.Name, false, nil)
 			if err != nil {
-				return errors.Wrap(err, "RabbitMQServer bindGroup QueueBind failed")
+				return errors.Join(err, errors.New("RabbitMQServer bindGroup QueueBind failed"))
 			}
 		}
 	}
@@ -149,7 +146,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 func (s *Server) newChannel(group *RouterGroup) (*amqp.Channel, error) {
 	ch, err := s.Conn.Channel()
 	if err != nil {
-		return nil, errors.Wrap(err, "RabbitMQServer DeclareAndBind failed to open ch")
+		return nil, errors.Join(err, errors.New("RabbitMQServer DeclareAndBind failed to open ch"))
 	}
 
 	if _, ok := s.routerGroupChannels[group]; !ok {
@@ -170,8 +167,6 @@ func (s *Server) worker(ctx context.Context, deliveryChan <-chan amqp.Delivery, 
 	defer s.workersWG.Done()
 
 	for delivery := range deliveryChan {
-		logrus.Tracef("RabbitMQServerer worker received message with routingKey %s", delivery.RoutingKey)
-
 		controllers := group.engine.Route(delivery.RoutingKey)
 
 		if len(controllers) < 1 {

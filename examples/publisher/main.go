@@ -2,11 +2,12 @@ package publisher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/Maksumys/go-hare"
-	"github.com/pkg/errors"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
+	"log/slog"
 	"os"
 )
 
@@ -28,11 +29,11 @@ func main() {
 	connection := rabbitmq.NewConnection(conn, func() (*amqp.Connection, error) {
 		conn, err := amqp.Dial(connUrl)
 		if err != nil {
-			return nil, errors.WithMessage(err, "di provideRabbit NewConnection Dial failed")
+			return nil, errors.Join(err, errors.New("di provideRabbit NewConnection Dial failed"))
 		}
 
 		return conn, nil
-	})
+	}, slog.Default())
 
 	runServer(connection)
 }

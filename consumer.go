@@ -1,9 +1,8 @@
 package rabbitmq
 
 import (
-	"github.com/pkg/errors"
+	"errors"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/sirupsen/logrus"
 )
 
 type Consumer struct {
@@ -53,7 +52,7 @@ func NewConsumer(conn *Connection, queueParams QueueParams, opts ...ConsumerOpti
 
 	err := c.prepareChannelAndTransport()
 	if err != nil {
-		return nil, errors.WithMessage(err, "RabbitMQConsumer NewConsumer prepareChannelAndTransport failed")
+		return nil, errors.Join(err, errors.New("RabbitMQConsumer NewConsumer prepareChannelAndTransport failed"))
 	}
 
 	return c, nil
@@ -63,7 +62,7 @@ func (c *Consumer) Consume(consumer string, autoAck, exclusive, noLocal, noWait 
 	go func() {
 		err := c.consume(consumer, autoAck, exclusive, noLocal, noWait, args)
 		if err != nil {
-			logrus.Errorf("RabbitMQConsumer Consume consume failed")
+			c.Conn.logger.Error("RabbitMQConsumer Consume consume failed")
 		}
 	}()
 
@@ -80,7 +79,7 @@ func (c *Consumer) consume(consumer string, autoAck, exclusive, noLocal, noWait 
 	for {
 		srcDeliveryChan, err := c.Channel.Consume(c.queueParams.Name, consumer, autoAck, exclusive, noLocal, noWait, args)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQConsumer consume Consume failed")
+			return errors.Join(err, errors.New("RabbitMQConsumer consume Consume failed"))
 		}
 
 		go func() {
@@ -92,18 +91,18 @@ func (c *Consumer) consume(consumer string, autoAck, exclusive, noLocal, noWait 
 		select {
 		case err = <-c.Conn.NotifyClose(make(chan error)):
 			if err != nil {
-				return errors.WithMessage(err, "RabbitMQConsumer consume NotifyClose")
+				return errors.Join(err, errors.New("RabbitMQConsumer consume NotifyClose"))
 			}
 
 			return nil
 		case err = <-c.Conn.NotifyReconnect(make(chan error)):
 			if err != nil {
-				return errors.WithMessage(err, "RabbitMQConsumer consume NotifyReconnect")
+				return errors.Join(err, errors.New("RabbitMQConsumer consume NotifyReconnect"))
 			}
 
 			err = c.prepareChannelAndTransport()
 			if err != nil {
-				return errors.WithMessage(err, "RabbitMQConsumer consume prepareChannelAndTransport failed")
+				return errors.Join(err, errors.New("RabbitMQConsumer consume prepareChannelAndTransport failed"))
 			}
 
 			continue
@@ -114,14 +113,14 @@ func (c *Consumer) consume(consumer string, autoAck, exclusive, noLocal, noWait 
 func (c *Consumer) prepareChannelAndTransport() error {
 	ch, err := c.Conn.Channel()
 	if err != nil {
-		return errors.Wrap(err, "RabbitMQConsumer prepareChannelAndTransport Channel failed")
+		return errors.Join(err, errors.New("RabbitMQConsumer prepareChannelAndTransport Channel failed"))
 	}
 
 	c.Channel = ch
 
 	err = c.declareAndBind()
 	if err != nil {
-		return errors.WithMessage(err, "RabbitMQConsumer prepareChannelAndTransport declareAndBind failed")
+		return errors.Join(err, errors.New("RabbitMQConsumer prepareChannelAndTransport declareAndBind failed"))
 	}
 
 	return nil
@@ -139,7 +138,7 @@ func (c *Consumer) declareAndBind() error {
 			c.exchangeParams.Args,
 		)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQConsumer declareAndBind ExchangeDeclare failed")
+			return errors.Join(err, errors.New("RabbitMQConsumer declareAndBind ExchangeDeclare failed"))
 		}
 	}
 
@@ -152,7 +151,7 @@ func (c *Consumer) declareAndBind() error {
 		c.queueParams.Args,
 	)
 	if err != nil {
-		return errors.Wrap(err, "RabbitMQConsumer declareAndBind QueueDeclare failed")
+		return errors.Join(err, errors.New("RabbitMQConsumer declareAndBind QueueDeclare failed"))
 	}
 
 	c.declaredQueue = queue
@@ -164,13 +163,13 @@ func (c *Consumer) declareAndBind() error {
 
 		err = c.Channel.QueueBind(c.declaredQueue.Name, c.bindingKey, c.exchangeParams.Name, false, nil)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQConsumer declareAndBind QueueBind failed")
+			return errors.Join(err, errors.New("RabbitMQConsumer declareAndBind QueueBind failed"))
 		}
 	}
 
 	err = c.Channel.Qos(c.qos.PrefetchCount, c.qos.PrefetchSize, false)
 	if err != nil {
-		return errors.Wrap(err, "RabbitMQConsumer declareAndBind Qos failed")
+		return errors.Join(err, errors.New("RabbitMQConsumer declareAndBind Qos failed"))
 	}
 
 	return nil

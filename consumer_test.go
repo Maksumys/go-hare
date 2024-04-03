@@ -1,17 +1,15 @@
 package rabbitmq
 
 import (
+	"context"
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/sirupsen/logrus"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestConsumer_Consume(t *testing.T) {
-	logrus.SetLevel(logrus.TraceLevel)
-
 	conn, err := newConn()
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +43,7 @@ func TestConsumer_Consume(t *testing.T) {
 
 			correlationId := fmt.Sprintf("%d", i)
 
-			err = ch.Publish(exchange.Name, "test.one", false, false, amqp.Publishing{
+			err = ch.PublishWithContext(context.Background(), exchange.Name, "test.one", false, false, amqp.Publishing{
 				ContentType:   "text/plain",
 				CorrelationId: correlationId,
 				Body:          []byte("message"),

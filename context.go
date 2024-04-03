@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/sirupsen/logrus"
 )
 
 type DeliveryContext struct {
@@ -55,16 +54,12 @@ func (c *DeliveryContext) BindJSON(ptr interface{}) error {
 
 func (c *DeliveryContext) Nack(requeue bool, err error) bool {
 	if c.Acked {
-		logrus.Warningf("message with key %s acked", c.Delivery.RoutingKey)
 		return false
 	}
 
 	if c.Nacked {
-		logrus.Warningf("message with key %s already nacked", c.Delivery.RoutingKey)
 		return false
 	}
-
-	logrus.Errorf("AMQP Consumer %v not acknowledged, error: %v", c.Delivery.RoutingKey, err)
 
 	err = c.Delivery.Nack(false, requeue)
 	if err != nil {
@@ -76,7 +71,6 @@ func (c *DeliveryContext) Nack(requeue bool, err error) bool {
 
 func (c *DeliveryContext) Ack() bool {
 	if c.Nacked {
-		logrus.Warningf("message with key %s nacked", c.Delivery.RoutingKey)
 		return false
 	}
 
@@ -86,11 +80,9 @@ func (c *DeliveryContext) Ack() bool {
 
 	err := c.Delivery.Ack(false)
 	if err != nil {
-		logrus.Warningf("RabbitMQ DeliveryContext Ack failed: %s", err)
 		return false
 	}
 
-	logrus.Tracef("AMQP Consumer %v acknowledged", c.Delivery.RoutingKey)
 	c.Acked = true
 	return true
 }

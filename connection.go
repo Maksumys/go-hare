@@ -2,23 +2,25 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/Maksumys/go-hare/pkg/backoff"
-	"github.com/pkg/errors"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/sirupsen/logrus"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 )
 
 type ConnectionFactory func() (*amqp.Connection, error)
 
-func NewConnection(conn *amqp.Connection, factory ConnectionFactory) *Connection {
+func NewConnection(conn *amqp.Connection, factory ConnectionFactory, logger *slog.Logger) *Connection {
 	c := &Connection{
 		Connection:        conn,
 		connectionFactory: factory,
 		notifyClose:       make([]chan error, 0),
 		notifyReconnect:   make([]chan error, 0),
 		mu:                sync.RWMutex{},
+		logger:            logger,
 	}
 
 	go c.watchReconnect(context.Background())
@@ -33,12 +35,13 @@ type Connection struct {
 	notifyClose       []chan error
 	notifyReconnect   []chan error
 	mu                sync.RWMutex
+	logger            *slog.Logger
 }
 
 func (c *Connection) Close() {
 	defer func() {
 		if r := recover(); r != nil {
-			logrus.Warningf("RabbitMQServer closeConn recovered: %v", r)
+			c.logger.Warn(fmt.Sprintf("RabbitMQServer closeConn recovered: %v", r))
 		}
 	}()
 
@@ -49,7 +52,7 @@ func (c *Connection) Close() {
 
 	err := c.Connection.Close()
 	if err != nil {
-		logrus.Debugf("RabbitMQServer closeConn Close failed: %v", err)
+		c.logger.Debug(fmt.Sprintf("RabbitMQServer closeConn Close failed: %v", err))
 	}
 }
 
@@ -77,17 +80,17 @@ func (c *Connection) watchReconnect(ctx context.Context) {
 	for {
 		errClose := <-c.Connection.NotifyClose(make(chan *amqp.Error, 1))
 		if errClose != nil {
-			go logrus.Warning("RabbitMQServer ListenAndServe NotifyClose")
+			go c.logger.Warn("RabbitMQServer ListenAndServe NotifyClose")
 
 			err := c.attemptReconnect(ctx)
 			if err != nil {
-				go logrus.Errorf("RabbitMQServer ListenAndServe attemptReconnecting failed: %v", err)
+				go c.logger.Warn(fmt.Sprintf("RabbitMQServer ListenAndServe attemptReconnecting failed: %v", err))
 
 				c.broadcastReconnect(err)
 				return
 			}
 
-			go logrus.Infof("RabbitMQServer ListenAndServe reconnected successfully")
+			go c.logger.Info("RabbitMQServer ListenAndServe reconnected successfully")
 			c.broadcastReconnect(nil)
 			continue
 		}
@@ -108,12 +111,12 @@ func (c *Connection) attemptReconnect(ctx context.Context) error {
 	for {
 		err := backoff.Retry(ctx)
 		if err != nil {
-			return errors.Wrap(err, "RabbitMQServer attemptReconnecting failed")
+			return errors.Join(err, errors.New("RabbitMQServer attemptReconnecting failed"))
 		}
 
 		c.Connection, err = c.connectionFactory()
 		if err != nil {
-			go logrus.Infof("RabbitMQServer attemptReconnecting failed: %s", err)
+			go c.logger.Info(fmt.Sprintf("RabbitMQServer attemptReconnecting failed: %s", err))
 			continue
 		}
 
