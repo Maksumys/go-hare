@@ -45,8 +45,6 @@ func (b *sigmoidBackoff) Retry(ctx context.Context) error {
 		return ErrMaxAttemptsReached
 	}
 
-	log.Printf("Backoff retry in %s\n", waitTime.String())
-
 	timer := time.NewTimer(waitTime)
 
 	select {
