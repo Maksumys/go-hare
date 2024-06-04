@@ -3,7 +3,6 @@ package backoff
 import (
 	"context"
 	"errors"
-	"log"
 	"math"
 	"time"
 )
