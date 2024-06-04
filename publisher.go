@@ -21,6 +21,7 @@ func NewPublisher(connection *Connection, exchangeParams ExchangeParams, opts ..
 		Conn:           connection,
 		exchangeParams: exchangeParams,
 		maxTimeout:     defaultBackoffMaxTimeout,
+		close:          make(chan struct{}, 1),
 	}
 
 	for _, opt := range opts {
@@ -75,6 +76,8 @@ type Publisher struct {
 	maxTimeout   time.Duration
 
 	logger *slog.Logger
+
+	close chan struct{}
 }
 
 func (p *Publisher) Publish(ctx context.Context, key string, mandatory, immediate bool, msg amqp.Publishing) (err error) {
@@ -108,6 +111,17 @@ func (p *Publisher) Broken() bool {
 	return p.consecutiveErrors.Load() > DefaultCircuitBreakerConsecutiveFailuresAllowed
 }
 
+func (p *Publisher) Close() error {
+	p.close <- struct{}{}
+
+	err := p.ch.Close()
+	if err != nil {
+		return errors.Join(err, errors.New("rabbitmq Publisher Close Close failed"))
+	}
+
+	return nil
+}
+
 func (p *Publisher) watchReconnect() {
 	defer func() {
 		p.connClosed = true
@@ -135,6 +149,8 @@ func (p *Publisher) watchReconnect() {
 
 			slog.Info("RabbitMQPublisher watchReconnect reconnected successfully")
 			continue
+		case <-p.close:
+			return
 		}
 	}
 }

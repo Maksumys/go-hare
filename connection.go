@@ -80,17 +80,17 @@ func (c *Connection) watchReconnect(ctx context.Context) {
 	for {
 		errClose := <-c.Connection.NotifyClose(make(chan *amqp.Error, 1))
 		if errClose != nil {
-			go c.logger.Warn("RabbitMQServer ListenAndServe NotifyClose")
+			go c.logger.WarnContext(ctx, "RabbitMQServer ListenAndServe NotifyClose")
 
 			err := c.attemptReconnect(ctx)
 			if err != nil {
-				go c.logger.Warn(fmt.Sprintf("RabbitMQServer ListenAndServe attemptReconnecting failed: %v", err))
+				go c.logger.WarnContext(ctx, fmt.Sprintf("RabbitMQServer ListenAndServe attemptReconnecting failed: %v", err))
 
 				c.broadcastReconnect(err)
 				return
 			}
 
-			go c.logger.Info("RabbitMQServer ListenAndServe reconnected successfully")
+			go c.logger.InfoContext(ctx, "RabbitMQServer ListenAndServe reconnected successfully")
 			c.broadcastReconnect(nil)
 			continue
 		}
@@ -134,7 +134,11 @@ func (c *Connection) broadcastClose(err error) {
 	c.notifyReconnect = make([]chan error, 0)
 
 	for _, ch := range channels {
-		ch <- err
+		select {
+		case ch <- err:
+		default:
+		}
+
 		close(ch)
 	}
 }
@@ -148,7 +152,10 @@ func (c *Connection) broadcastReconnect(err error) {
 	c.notifyClose = make([]chan error, 0)
 
 	for _, ch := range channels {
-		ch <- err
+		select {
+		case ch <- err:
+		default:
+		}
 		close(ch)
 	}
 }

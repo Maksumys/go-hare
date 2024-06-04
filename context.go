@@ -62,11 +62,8 @@ func (c *DeliveryContext) Nack(requeue bool, err error) bool {
 	}
 
 	err = c.Delivery.Nack(false, requeue)
-	if err != nil {
-		return false
-	}
 
-	return true
+	return err == nil
 }
 
 func (c *DeliveryContext) Ack() bool {
