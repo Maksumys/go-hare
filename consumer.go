@@ -1,9 +1,12 @@
 package rabbitmq
 
 import (
+	"context"
 	"errors"
+	"github.com/Maksumys/go-hare/pkg/backoff"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log/slog"
+	"time"
 )
 
 type Consumer struct {
@@ -22,6 +25,8 @@ type Consumer struct {
 	qos QualityOfService
 
 	logger *slog.Logger
+
+	maxTimeout time.Duration
 }
 
 type ConsumerOption func(p *Consumer)
@@ -53,6 +58,7 @@ func NewConsumer(conn *Connection, queueParams QueueParams, opts ...ConsumerOpti
 		Conn:            conn,
 		dstDeliveryChan: make(chan amqp.Delivery),
 		queueParams:     queueParams,
+		maxTimeout:      defaultBackoffMaxTimeout,
 	}
 
 	for _, opt := range opts {
@@ -99,10 +105,6 @@ func (c *Consumer) subscribe(consumer string, autoAck, exclusive, noLocal, noWai
 			if ok {
 				c.dstDeliveryChan <- msg
 			} else {
-				if c.Conn.isClosed {
-					return nil
-				}
-
 				if err = c.prepareChannelAndTransport(); err != nil {
 					return errors.Join(err, errors.New("RabbitMQConsumer consume prepareChannelAndTransport failed"))
 				}
@@ -114,19 +116,40 @@ func (c *Consumer) subscribe(consumer string, autoAck, exclusive, noLocal, noWai
 }
 
 func (c *Consumer) prepareChannelAndTransport() error {
-	ch, err := c.Conn.conn.Channel()
-	if err != nil {
-		return errors.Join(err, errors.New("RabbitMQConsumer prepareChannelAndTransport Channel failed"))
+	if err := c.newChannel(); err != nil {
+		return errors.Join(err, errors.New("failed to open new channel"))
 	}
 
-	c.Channel = ch
-
-	err = c.declareAndBind()
-	if err != nil {
+	if err := c.declareAndBind(); err != nil {
 		return errors.Join(err, errors.New("RabbitMQConsumer prepareChannelAndTransport declareAndBind failed"))
 	}
 
 	return nil
+}
+
+func (c *Consumer) newChannel() error {
+	backoffRetry := backoff.NewSigmoidBackoff(c.maxTimeout, 0.5, 15, 100)
+
+	for {
+		err := backoffRetry.Retry(context.Background())
+
+		if err != nil {
+			return err
+		}
+
+		conn := c.Conn.GetConnection()
+
+		if conn != nil && !conn.IsClosed() {
+			c.Channel, err = conn.Channel()
+
+			if err != nil {
+				go c.logger.Error("failed to create new channel", "error", err)
+				continue
+			}
+
+			return nil
+		}
+	}
 }
 
 func (c *Consumer) declareAndBind() error {
