@@ -5,6 +5,7 @@ import (
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -19,17 +20,12 @@ func newConn() (*Connection, error) {
 		os.Getenv("PORT"),
 	)
 
-	conn, err := amqp.Dial(connUrl)
-	if err != nil {
-		return nil, err
-	}
-
-	connection := NewConnection(conn, func() (*amqp.Connection, error) {
-		return amqp.Dial(connUrl)
-	})
-	if err != nil {
-		return nil, err
-	}
+	connection := NewConnection(
+		func() (*amqp.Connection, error) {
+			return amqp.Dial(connUrl)
+		},
+		slog.Default(),
+	)
 
 	return connection, nil
 }
@@ -111,7 +107,7 @@ func TestServerRouting(t *testing.T) {
 
 	<-time.After(1 * time.Second)
 
-	publisherCh, err := conn.Channel()
+	publisherCh, err := conn.conn.Channel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +172,7 @@ func TestServer_Shutdown(t *testing.T) {
 
 	<-time.After(1 * time.Second)
 
-	publisherCh, err := conn.Channel()
+	publisherCh, err := conn.conn.Channel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +261,7 @@ func TestServer_Reconnect(t *testing.T) {
 	default:
 	}
 
-	publisher, err := conn.Channel()
+	publisher, err := conn.conn.Channel()
 	if err != nil {
 		t.Fatal(err)
 	}

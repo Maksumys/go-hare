@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"errors"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"log/slog"
 )
 
 type Consumer struct {
@@ -19,6 +20,8 @@ type Consumer struct {
 	declaredQueue amqp.Queue
 
 	qos QualityOfService
+
+	logger *slog.Logger
 }
 
 type ConsumerOption func(p *Consumer)
@@ -39,6 +42,12 @@ func WithConsumerQos(qos QualityOfService) ConsumerOption {
 	}
 }
 
+func WithConsumerLogger(logger *slog.Logger) ConsumerOption {
+	return func(p *Consumer) {
+		p.logger = logger
+	}
+}
+
 func NewConsumer(conn *Connection, queueParams QueueParams, opts ...ConsumerOption) (*Consumer, error) {
 	c := &Consumer{
 		Conn:            conn,
@@ -50,6 +59,10 @@ func NewConsumer(conn *Connection, queueParams QueueParams, opts ...ConsumerOpti
 		opt(c)
 	}
 
+	if c.logger == nil {
+		c.logger = slog.Default()
+	}
+
 	err := c.prepareChannelAndTransport()
 	if err != nil {
 		return nil, errors.Join(err, errors.New("RabbitMQConsumer NewConsumer prepareChannelAndTransport failed"))
@@ -58,11 +71,10 @@ func NewConsumer(conn *Connection, queueParams QueueParams, opts ...ConsumerOpti
 	return c, nil
 }
 
-func (c *Consumer) Consume(consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) <-chan amqp.Delivery {
+func (c *Consumer) Subscribe(consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) <-chan amqp.Delivery {
 	go func() {
-		err := c.consume(consumer, autoAck, exclusive, noLocal, noWait, args)
-		if err != nil {
-			c.Conn.logger.Error("RabbitMQConsumer Consume consume failed")
+		if err := c.subscribe(consumer, autoAck, exclusive, noLocal, noWait, args); err != nil {
+			c.logger.Error("RabbitMQConsumer Consume consume failed")
 		}
 	}()
 
@@ -73,7 +85,7 @@ func (c *Consumer) DeclaredQueue() amqp.Queue {
 	return c.declaredQueue
 }
 
-func (c *Consumer) consume(consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) error {
+func (c *Consumer) subscribe(consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) error {
 	defer close(c.dstDeliveryChan)
 
 	for {
@@ -82,36 +94,27 @@ func (c *Consumer) consume(consumer string, autoAck, exclusive, noLocal, noWait 
 			return errors.Join(err, errors.New("RabbitMQConsumer consume Consume failed"))
 		}
 
-		go func() {
-			for delivery := range srcDeliveryChan {
-				c.dstDeliveryChan <- delivery
-			}
-		}()
+		for {
+			msg, ok := <-srcDeliveryChan
+			if ok {
+				c.dstDeliveryChan <- msg
+			} else {
+				if c.Conn.isClosed {
+					return nil
+				}
 
-		select {
-		case err = <-c.Conn.NotifyClose(make(chan error)):
-			if err != nil {
-				return errors.Join(err, errors.New("RabbitMQConsumer consume NotifyClose"))
-			}
+				if err = c.prepareChannelAndTransport(); err != nil {
+					return errors.Join(err, errors.New("RabbitMQConsumer consume prepareChannelAndTransport failed"))
+				}
 
-			return nil
-		case err = <-c.Conn.NotifyReconnect(make(chan error)):
-			if err != nil {
-				return errors.Join(err, errors.New("RabbitMQConsumer consume NotifyReconnect"))
+				break
 			}
-
-			err = c.prepareChannelAndTransport()
-			if err != nil {
-				return errors.Join(err, errors.New("RabbitMQConsumer consume prepareChannelAndTransport failed"))
-			}
-
-			continue
 		}
 	}
 }
 
 func (c *Consumer) prepareChannelAndTransport() error {
-	ch, err := c.Conn.Channel()
+	ch, err := c.Conn.conn.Channel()
 	if err != nil {
 		return errors.Join(err, errors.New("RabbitMQConsumer prepareChannelAndTransport Channel failed"))
 	}

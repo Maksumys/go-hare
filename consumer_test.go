@@ -15,7 +15,7 @@ func TestConsumer_Consume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ch, err := conn.Channel()
+	ch, err := conn.GetConnection().Channel()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestConsumer_Consume(t *testing.T) {
 		return
 	}
 
-	deliveryChan := c.Consume("test-consumer", false, false, false, false, nil)
+	deliveryChan := c.Subscribe("test-consumer", false, false, false, false, nil)
 
 	// wait for consumer to initialize
 	time.Sleep(2 * time.Second)

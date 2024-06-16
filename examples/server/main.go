@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/Maksumys/go-hare"
+	rabbitmq "github.com/Maksumys/go-hare"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
 	"log/slog"
@@ -20,25 +20,22 @@ func main() {
 		os.Getenv("PORT"),
 	)
 
-	conn, err := amqp.Dial(connUrl)
+	connection := rabbitmq.NewConnection(
+		func() (*amqp.Connection, error) {
+			conn, err := amqp.Dial(connUrl)
+			if err != nil {
+				return nil, errors.Join(err, errors.New("di provideRabbit NewConnection Dial failed"))
+			}
 
-	if err != nil {
-		panic(err)
-	}
-
-	connection := rabbitmq.NewConnection(conn, func() (*amqp.Connection, error) {
-		conn, err := amqp.Dial(connUrl)
-		if err != nil {
-			return nil, errors.Join(err, errors.New("di provideRabbit NewConnection Dial failed"))
-		}
-
-		return conn, nil
-	}, slog.Default())
+			return conn, nil
+		},
+		slog.Default(),
+	)
 
 	router := provideRouter()
 	server := rabbitmq.NewServer(connection, router)
 
-	err = server.ListenAndServe(context.Background())
+	err := server.ListenAndServe(context.Background())
 	if err != nil {
 		log.Fatal(err)
 	}

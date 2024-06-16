@@ -7,7 +7,6 @@ import (
 	"github.com/Maksumys/go-hare/pkg/backoff"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log/slog"
-	"sync/atomic"
 	"time"
 )
 
@@ -16,21 +15,34 @@ const (
 	defaultBackoffMaxTimeout                        = 15 * time.Second
 )
 
+var (
+	ErrPrepareChannel  = errors.New("prepare channel error")
+	ErrCreateChannel   = errors.New("failed to create channel in rabbitmq publisher")
+	ErrDeclareExchange = errors.New("failed to declare exchange in rabbitmq publisher")
+	ErrDeclareQueue    = errors.New("failed to declare queue in rabbitmq publisher")
+	ErrQueueBind       = errors.New("failed to bind queue in rabbitmq publisher")
+	ErrPublishMessage  = errors.New("failed to publish message in rabbitmq publisher")
+)
+
 func NewPublisher(connection *Connection, exchangeParams ExchangeParams, opts ...PublisherOption) (*Publisher, error) {
 	p := &Publisher{
 		Conn:           connection,
 		exchangeParams: exchangeParams,
 		maxTimeout:     defaultBackoffMaxTimeout,
 		close:          make(chan struct{}, 1),
+		isClosed:       false,
 	}
 
 	for _, opt := range opts {
 		opt(p)
 	}
 
-	err := p.prepareChannelAndTransport()
-	if err != nil {
-		return nil, errors.Join(err, errors.New("RabbitMQPublisher NewPublisher prepareChannelAndTransport failed"))
+	if p.logger == nil {
+		p.logger = slog.Default()
+	}
+
+	if err := p.prepareChannelAndTransport(); err != nil {
+		return nil, errors.Join(err, ErrPrepareChannel)
 	}
 
 	go p.watchReconnect()
@@ -54,7 +66,7 @@ func WithQueueDeclaration(queueParams QueueParams, bindingKey string) PublisherO
 	}
 }
 
-func WithLogger(logger *slog.Logger) PublisherOption {
+func WithPublisherLogger(logger *slog.Logger) PublisherOption {
 	return func(p *Publisher) {
 		p.logger = logger
 	}
@@ -63,9 +75,6 @@ func WithLogger(logger *slog.Logger) PublisherOption {
 type Publisher struct {
 	Conn *Connection
 	ch   *amqp.Channel
-
-	consecutiveErrors atomic.Uint32
-	connClosed        bool
 
 	exchangeParams ExchangeParams
 	declareQueue   bool
@@ -77,45 +86,37 @@ type Publisher struct {
 
 	logger *slog.Logger
 
-	close chan struct{}
+	close    chan struct{}
+	isClosed bool
 }
 
 func (p *Publisher) Publish(ctx context.Context, key string, mandatory, immediate bool, msg amqp.Publishing) (err error) {
 	backoffRetry := backoff.NewSigmoidBackoff(p.maxTimeout, 0.5, 15, 0)
 	for {
-		err = p.ch.PublishWithContext(ctx, p.exchangeParams.Name, key, mandatory, immediate, msg)
-		if err != nil {
+		if err = p.ch.PublishWithContext(ctx, p.exchangeParams.Name, key, mandatory, immediate, msg); err != nil {
 			slog.WarnContext(ctx, fmt.Sprintf("RabbitMQPublisher Publish failed: %v", err))
-			p.consecutiveErrors.Add(1)
 
-			if !p.retryPublish || p.connClosed {
+			if !p.retryPublish || p.Conn.isClosed || p.ch.IsClosed() {
 				return err
 			}
 
-			err = backoffRetry.Retry(ctx)
-			if err != nil {
-				return errors.Join(err, errors.New("RabbitMQPublisher Publish BackoffRetry failed"))
+			if err = backoffRetry.Retry(ctx); err != nil {
+				return errors.Join(err, ErrPublishMessage)
 			}
 
 			continue
 		}
 
-		p.consecutiveErrors.Store(0)
-
 		return
 	}
 }
 
-// Broken возвращает true в случае, если последовательное количество ошибок Publish > DefaultCircuitBreakerConsecutiveFailuresAllowed
-func (p *Publisher) Broken() bool {
-	return p.consecutiveErrors.Load() > DefaultCircuitBreakerConsecutiveFailuresAllowed
-}
-
 func (p *Publisher) Close() error {
+	p.isClosed = true
+
 	p.close <- struct{}{}
 
-	err := p.ch.Close()
-	if err != nil {
+	if err := p.ch.Close(); err != nil {
 		return errors.Join(err, errors.New("rabbitmq Publisher Close Close failed"))
 	}
 
@@ -123,60 +124,66 @@ func (p *Publisher) Close() error {
 }
 
 func (p *Publisher) watchReconnect() {
-	defer func() {
-		p.connClosed = true
-	}()
-
 	for {
 		select {
-		case err := <-p.Conn.NotifyClose(make(chan error)):
-			if err != nil {
-				slog.Error(fmt.Sprintf("RabbitMQPublisher watchReconnect NotifyClose: %v", err))
-			}
-
-			return
-		case err := <-p.Conn.NotifyReconnect(make(chan error)):
-			if err != nil {
-				slog.Error(fmt.Sprintf("RabbitMQPublisher watchReconnect NotifyReconnect: %v", err))
-				return
-			}
-
-			err = p.prepareChannelAndTransport()
-			if err != nil {
-				slog.Error(fmt.Sprintf("RabbitMQPublisher watchReconnect prepareChannelAndTransport failed: %v", err))
-				return
-			}
-
-			slog.Info("RabbitMQPublisher watchReconnect reconnected successfully")
-			continue
 		case <-p.close:
 			return
+		default:
+			reason, ok := <-p.ch.NotifyClose(make(chan *amqp.Error))
+			if !ok {
+				if p.isClosed {
+					return
+				}
+
+				go p.logger.Error("rabbitmq channel stopped")
+
+				if err := p.prepareChannelAndTransport(); err != nil {
+					go p.logger.Error(fmt.Sprintf("watchReconnect Close failed:  %v", reason))
+				}
+			}
 		}
 	}
 }
 
 func (p *Publisher) prepareChannelAndTransport() error {
-	err := p.newChannel()
-	if err != nil {
-		return errors.Join(err, errors.New("RabbitMQPublisher watchReconnect newChannel failed"))
+	if err := p.newChannel(); err != nil {
+		return err
 	}
 
-	err = p.declareAndBind(p.bindingKey)
-	if err != nil {
-		return errors.Join(err, errors.New("RabbitMQPublisher watchReconnect declareAndBind failed"))
+	if err := p.declareAndBind(p.bindingKey); err != nil {
+		return err
 	}
 
 	return nil
 }
 
 func (p *Publisher) newChannel() error {
-	var err error
-	p.ch, err = p.Conn.Channel()
-	return err
+	backoffRetry := backoff.NewSigmoidBackoff(p.maxTimeout, 0.5, 15, 100)
+
+	for {
+		err := backoffRetry.Retry(context.Background())
+
+		if err != nil {
+			return err
+		}
+
+		conn := p.Conn.GetConnection()
+
+		if conn != nil && !conn.IsClosed() {
+			p.ch, err = conn.Channel()
+
+			if err != nil {
+				p.logger.Error("failed to create new channel", "error", err)
+				continue
+			}
+
+			return nil
+		}
+	}
 }
 
 func (p *Publisher) declareAndBind(bindingKey string) error {
-	err := p.ch.ExchangeDeclare(
+	if err := p.ch.ExchangeDeclare(
 		p.exchangeParams.Name,
 		p.exchangeParams.Kind,
 		p.exchangeParams.Durable,
@@ -184,9 +191,8 @@ func (p *Publisher) declareAndBind(bindingKey string) error {
 		p.exchangeParams.Internal,
 		p.exchangeParams.NoWait,
 		p.exchangeParams.Args,
-	)
-	if err != nil {
-		return errors.Join(err, errors.New("RabbitMQPublisher declareAndBind ExchangeDeclare failed"))
+	); err != nil {
+		return errors.Join(err, ErrDeclareExchange)
 	}
 
 	if p.declareQueue {
@@ -199,12 +205,11 @@ func (p *Publisher) declareAndBind(bindingKey string) error {
 			p.queueParams.Args,
 		)
 		if err != nil {
-			return errors.Join(err, errors.New("RabbitMQPublisher declareAndBind QueueDeclare failed"))
+			return errors.Join(err, ErrDeclareQueue)
 		}
 
-		err = p.ch.QueueBind(queue.Name, bindingKey, p.exchangeParams.Name, false, nil)
-		if err != nil {
-			return errors.Join(err, errors.New("RabbitMQPublisher declareAndBind QueueBind failed"))
+		if err = p.ch.QueueBind(queue.Name, bindingKey, p.exchangeParams.Name, false, nil); err != nil {
+			return errors.Join(err, ErrQueueBind)
 		}
 	}
 

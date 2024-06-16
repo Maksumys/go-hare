@@ -3,7 +3,7 @@ package logger
 import (
 	"context"
 	"fmt"
-	"github.com/Maksumys/go-hare"
+	rabbitmq "github.com/Maksumys/go-hare"
 )
 
 type Logger interface {

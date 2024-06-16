@@ -59,20 +59,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		// convert wg.Wait() to channel
 		go func() { s.workersWG.Wait(); s.waitCh <- struct{}{} }()
 
-		select {
-		case err := <-s.Conn.NotifyClose(make(chan error)):
-			if err != nil {
-				return errors.Join(err, errors.New("RabbitMQServer ListenAndServe NotifyClose"))
-			}
-			return nil
-		case err := <-s.Conn.NotifyReconnect(make(chan error)):
-			if err != nil {
-				return errors.Join(err, errors.New("RabbitMQServer ListenAndServe NotifyReconnect"))
-			}
+		<-s.Conn.conn.NotifyClose(make(chan *amqp.Error))
 
-			s.removeActiveChannelsAfterReconnect()
-			continue
+		if s.Conn.isClosed {
+			return nil
 		}
+
+		s.removeActiveChannelsAfterReconnect()
 	}
 }
 
@@ -144,7 +137,7 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 }
 
 func (s *Server) newChannel(group *RouterGroup) (*amqp.Channel, error) {
-	ch, err := s.Conn.Channel()
+	ch, err := s.Conn.conn.Channel()
 	if err != nil {
 		return nil, errors.Join(err, errors.New("RabbitMQServer DeclareAndBind failed to open ch"))
 	}
