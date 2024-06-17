@@ -80,7 +80,7 @@ func NewConsumer(conn *Connection, queueParams QueueParams, opts ...ConsumerOpti
 func (c *Consumer) Subscribe(consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) <-chan amqp.Delivery {
 	go func() {
 		if err := c.subscribe(consumer, autoAck, exclusive, noLocal, noWait, args); err != nil {
-			c.logger.Error("RabbitMQConsumer Consume consume failed")
+			go c.logger.Error("RabbitMQConsumer Consume consume failed")
 		}
 	}()
 
@@ -105,16 +105,16 @@ func (c *Consumer) subscribe(consumer string, autoAck, exclusive, noLocal, noWai
 			if ok {
 				c.dstDeliveryChan <- msg
 			} else {
-				c.logger.Error("consumer connection closed")
+				go c.logger.Error("consumer connection closed")
 
 				if c.Conn.isClosed {
 					return nil
 				}
 
-				c.logger.Debug("consumer trying to prepare channel")
+				go c.logger.Debug("consumer trying to prepare channel")
 
 				if err = c.prepareChannelAndTransport(); err != nil {
-					c.logger.Error("consumer failed to prepare channel", "error", err)
+					go c.logger.Error("consumer failed to prepare channel", "error", err)
 					return errors.Join(err, errors.New("RabbitMQConsumer consume prepareChannelAndTransport failed"))
 				}
 
