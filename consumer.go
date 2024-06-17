@@ -140,15 +140,11 @@ func (c *Consumer) newChannel() error {
 	backoffRetry := backoff.NewSigmoidBackoff(c.maxTimeout, 0.5, 15, 100)
 
 	for {
-		err := backoffRetry.Retry(context.Background())
-
-		if err != nil {
-			return err
-		}
-
 		conn := c.Conn.GetConnection()
 
 		if conn != nil && !conn.IsClosed() {
+			var err error
+
 			c.Channel, err = conn.Channel()
 
 			if err != nil {
@@ -157,6 +153,12 @@ func (c *Consumer) newChannel() error {
 			}
 
 			return nil
+		}
+
+		err := backoffRetry.Retry(context.Background())
+
+		if err != nil {
+			return err
 		}
 	}
 }

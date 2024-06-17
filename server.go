@@ -145,12 +145,6 @@ func (s *Server) newChannel(group *RouterGroup) (*amqp.Channel, error) {
 	backoffRetry := backoff.NewSigmoidBackoff(s.maxTimeout, 0.5, 15, 100)
 
 	for {
-		err := backoffRetry.Retry(context.Background())
-
-		if err != nil {
-			return nil, err
-		}
-
 		conn := s.Conn.GetConnection()
 
 		if conn != nil && !conn.IsClosed() {
@@ -166,6 +160,12 @@ func (s *Server) newChannel(group *RouterGroup) (*amqp.Channel, error) {
 			s.routerGroupChannels[group] = append(s.routerGroupChannels[group], ch)
 
 			return ch, nil
+		}
+
+		err := backoffRetry.Retry(context.Background())
+
+		if err != nil {
+			return nil, err
 		}
 	}
 }
