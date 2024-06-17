@@ -3,8 +3,10 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"github.com/Maksumys/go-hare/pkg/backoff"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"sync"
+	"time"
 )
 
 func NewServer(conn *Connection, router *Router) *Server {
@@ -14,6 +16,7 @@ func NewServer(conn *Connection, router *Router) *Server {
 		routerGroupChannels: make(map[*RouterGroup][]*amqp.Channel),
 		workersWG:           &sync.WaitGroup{},
 		waitCh:              make(chan struct{}),
+		maxTimeout:          defaultBackoffMaxTimeout,
 	}
 }
 
@@ -25,6 +28,8 @@ type Server struct {
 
 	workersWG *sync.WaitGroup
 	waitCh    chan struct{}
+
+	maxTimeout time.Duration
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -137,17 +142,32 @@ func (s *Server) bindGroup(group *RouterGroup) error {
 }
 
 func (s *Server) newChannel(group *RouterGroup) (*amqp.Channel, error) {
-	ch, err := s.Conn.conn.Channel()
-	if err != nil {
-		return nil, errors.Join(err, errors.New("RabbitMQServer DeclareAndBind failed to open ch"))
-	}
+	backoffRetry := backoff.NewSigmoidBackoff(s.maxTimeout, 0.5, 15, 100)
 
-	if _, ok := s.routerGroupChannels[group]; !ok {
-		s.routerGroupChannels[group] = make([]*amqp.Channel, 0)
-	}
-	s.routerGroupChannels[group] = append(s.routerGroupChannels[group], ch)
+	for {
+		err := backoffRetry.Retry(context.Background())
 
-	return ch, nil
+		if err != nil {
+			return nil, err
+		}
+
+		conn := s.Conn.GetConnection()
+
+		if conn != nil && !conn.IsClosed() {
+			ch, err := conn.Channel()
+
+			if err != nil {
+				continue
+			}
+
+			if _, ok := s.routerGroupChannels[group]; !ok {
+				s.routerGroupChannels[group] = make([]*amqp.Channel, 0)
+			}
+			s.routerGroupChannels[group] = append(s.routerGroupChannels[group], ch)
+
+			return ch, nil
+		}
+	}
 }
 
 func (s *Server) removeActiveChannelsAfterReconnect() {
